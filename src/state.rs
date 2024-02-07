@@ -1,9 +1,7 @@
-use futures::channel::mpsc::Receiver;
-use futures::{stream, StreamExt};
-use tokio::io::AsyncWriteExt;
-// use futures::channel::mpsc;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender, Receiver, Sender};
 use tokio::net::{ToSocketAddrs, TcpStream};
+use tokio::select;
+use tokio::io::AsyncWriteExt;
 
 use std::borrow::Borrow;
 use std::collections::hash_map::{Entry,HashMap};
@@ -52,9 +50,10 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash, {
                     match self.peers.entry(addr) {
                         Entry::Occupied(..) => (),
                         Entry::Vacant(entry) => {
-                            let (client_rx, client_tx) = tokio::sync::mpsc::unbounded_channel();
-                            entry.insert(client_rx);
-                            // self.client_handler(messages, stream)
+                            let (client_tx, mut client_rx) = mpsc::unbounded_channel::<String>();
+                            let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+                            entry.insert(client_tx);
+                            self.client_handler(&mut client_rx, stream, shutdown_rx);
                         },
 
                     }
@@ -78,23 +77,35 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash, {
 
     async fn client_handler(
         &self, 
-        messages: &mut Receiver<String>, 
+        messages: &mut UnboundedReceiver<String>, 
         mut stream: Arc<RwLock<TcpStream>>,
         mut shutdown_rx: Receiver<ShutdownSignal>,
     ) -> Result<(), Box<dyn Error>> {
 
-        // while let Some(msg) = messages.next().await {
-        //     if let Ok(mut write_guard) = stream.try_write() {
-        //         write_guard.write_all(msg.as_bytes());
-        //     } else {
-        //         let packetlossmsg = format!("Packet failed to send: {}", msg);
-        //         dbg!(packetlossmsg);
-        //         continue;
-        //     }
-        // }
-        
+        let local_addr = stream.try_read().unwrap().local_addr();
 
+        select! {
+            _ = shutdown_rx.try_recv() => {
+                drop(stream);
+                drop(messages);
+                dbg!("client {} has been terminated", local_addr);
+            }
 
+            else => {
+                loop {
+                    while let Some(msg) = messages.next().await {
+                        if let Ok(mut wguard) = stream.try_write() {
+                            wguard.write_all(msg.as_bytes());
+                        } else {
+                            let packetlossmsg = format!("Packet failed to send: {}", msg);
+                            dbg!(packetlossmsg);
+                            continue;
+                        }
+                    }
+                }
+            }
+
+        }
         Ok(()) 
     }
 

@@ -2,7 +2,7 @@ use std::error::Error;
 
 use futures::channel::mpsc::UnboundedSender;
 use futures::executor::block_on;
-use futures::future::Join;
+use futures::future::{Join, FusedFuture};
 use futures::{Future, SinkExt};
 // use futures::SinkExt;
 // use std::collections::HashMap;
