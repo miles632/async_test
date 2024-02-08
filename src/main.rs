@@ -1,25 +1,23 @@
 use std::error::Error;
 
-use futures::channel::mpsc::UnboundedSender;
-use futures::executor::block_on;
-use futures::future::{Join, FusedFuture};
 use futures::{Future, SinkExt};
 
+use tokio::sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender, Receiver, Sender};
 use state::Event;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle,spawn};
-use tokio::sync::{mpsc, Mutex};
 
 pub mod state;
+pub mod client;
 
-async fn unwrap_future<F, A>(future: F, _sender: UnboundedSender<Event<A>>) -> JoinHandle<()>
+async fn unwrap_future<F,A>(future: F, sender: UnboundedSender<Event<A>>) -> JoinHandle<()>
 where 
-    F: Future<Output = Result<(), Box<dyn Error>>> + Send + 'static,
-    // A: Send + 'static,
+    F: Future<Output = Result<(), Box<dyn Error>>> + Send + 'static + Send,
+    A: Send, 
 {
     tokio::task::spawn(async move {
         if let Err(e) = future.await {
-            todo!()
+            sender.send(Event::ServerErrorLogRequest { err: e }).unwrap();
         }
     })
 }

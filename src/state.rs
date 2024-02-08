@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::ShutdownSignal;
 
-pub enum Event <A>{
+pub enum Event <A: Send>{
     NewPeer {
         addr: A,
         stream: Arc<RwLock<TcpStream>>,
@@ -25,7 +25,7 @@ pub enum Event <A>{
         content: String,
     },
     ServerErrorLogRequest {
-        err: Box<dyn Error>,
+        err: Box<dyn Error + Send>,
     }
 }
 
@@ -35,7 +35,8 @@ pub struct ServerState <A: ToSocketAddrs>{
 }
 
 impl<A> ServerState<A> 
-where A: ToSocketAddrs + PartialEq + Eq + Display + Hash, {
+where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send, {
+
     async fn event_handler(
         mut self,
         mut event_rx: UnboundedReceiver<Event<A>>,
@@ -57,10 +58,10 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash, {
 
                     }
                 }
-                Event::PeerDisconnect { addr } => {
+                Event::NewMessage { from, to, content } => {
                     todo!()
                 }
-                Event::NewMessage { from, to, content } => {
+                Event::PeerDisconnect { addr } => {
                     todo!()
                 }
                 Event::ServerErrorLogRequest { err } => {
@@ -84,6 +85,7 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash, {
 
         let local_addr = stream.try_read().unwrap().local_addr()?;
 
+        // poll the else branch unless .recv() is ready
         select! {
             _ = shutdown_rx.recv() => {
                 drop(stream);
