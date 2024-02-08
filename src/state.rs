@@ -3,7 +3,6 @@ use tokio::net::{ToSocketAddrs, TcpStream};
 use tokio::select;
 use tokio::io::AsyncWriteExt;
 
-use std::borrow::Borrow;
 use std::collections::hash_map::{Entry,HashMap};
 use std::error::Error;
 use std::fmt::Display;
@@ -75,6 +74,7 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash, {
         Ok(())
     }
 
+    // TODO: add server broadcasting alongside an event sender to state
     async fn client_handler(
         &self, 
         messages: &mut UnboundedReceiver<String>, 
@@ -82,10 +82,10 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash, {
         mut shutdown_rx: Receiver<ShutdownSignal>,
     ) -> Result<(), Box<dyn Error>> {
 
-        let local_addr = stream.try_read().unwrap().local_addr();
+        let local_addr = stream.try_read().unwrap().local_addr()?;
 
         select! {
-            _ = shutdown_rx.try_recv() => {
+            _ = shutdown_rx.recv() => {
                 drop(stream);
                 drop(messages);
                 dbg!("client {} has been terminated", local_addr);
@@ -93,7 +93,7 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash, {
 
             else => {
                 loop {
-                    while let Some(msg) = messages.next().await {
+                    while let Some(msg) = messages.recv().await {
                         if let Ok(mut wguard) = stream.try_write() {
                             wguard.write_all(msg.as_bytes());
                         } else {

@@ -4,12 +4,6 @@ use futures::channel::mpsc::UnboundedSender;
 use futures::executor::block_on;
 use futures::future::{Join, FusedFuture};
 use futures::{Future, SinkExt};
-// use futures::SinkExt;
-// use std::collections::HashMap;
-// use std::env;
-// use std::io;
-// use std::net::SocketAddr;
-// use std::sync::Arc;
 
 use state::Event;
 use tokio::net::{TcpListener, TcpStream};
@@ -25,6 +19,7 @@ where
 {
     tokio::task::spawn(async move {
         if let Err(e) = future.await {
+            todo!()
         }
     })
 }
