@@ -1,11 +1,13 @@
 use std::error::Error;
+use std::boxed::Box;
 
 use futures::{Future, SinkExt};
 
 use tokio::sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender, Receiver, Sender};
-use state::Event;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle,spawn};
+
+use crate::state::Event;
 
 pub mod state;
 pub mod client;
@@ -17,7 +19,7 @@ where
 {
     tokio::task::spawn(async move {
         if let Err(e) = future.await {
-            sender.send(Event::ServerErrorLogRequest { err: e }).unwrap();
+            sender.send(Event::ServerErrorLogRequest { err: Box::new(e) }).unwrap();
         }
     })
 }

@@ -9,7 +9,10 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 
-use crate::ShutdownSignal;
+use crate::{client, ShutdownSignal};
+use crate::client::Peer;
+
+
 
 pub enum Event <A: Send>{
     NewPeer {
@@ -30,12 +33,18 @@ pub enum Event <A: Send>{
 }
 
 
-pub struct ServerState <A: ToSocketAddrs>{
-    peers:  HashMap<A, UnboundedSender<String>>,
+pub struct ServerState <A>
+where 
+    A: ToSocketAddrs + Send
+{
+    // peers:  HashMap<A, UnboundedSender<String>>,
+    peers: HashMap<A, Peer>
+    // peers: HashMap<A, (UnboundedSender<String>, UnboundedSender<ShutdownSignal>)>
 }
 
 impl<A> ServerState<A> 
-where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send, {
+where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send, 
+{
 
     async fn event_handler(
         mut self,
@@ -43,6 +52,7 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send, {
     ) -> Result<(), Box<dyn Error>> {
         while let Some(event) = event_rx.recv().await {
             match event {
+
                 Event::NewPeer { addr, stream } => {
                     let contents = format!("User {} has joined the session", addr);
                     self.server_broadcast(contents).await;
@@ -50,20 +60,30 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send, {
                     match self.peers.entry(addr) {
                         Entry::Occupied(..) => (),
                         Entry::Vacant(entry) => {
-                            let (client_tx, mut client_rx) = mpsc::unbounded_channel::<String>();
-                            let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-                            entry.insert(client_tx);
+                            let (client_tx, mut client_rx) 
+                                = mpsc::unbounded_channel(); 
+                            let (shutdown_tx, shutdown_rx) 
+                                = mpsc::channel(1);
+                            entry.insert(
+                                Peer {
+                                    message_tx: client_tx,
+                                    shutdown_tx: shutdown_tx,
+                                }
+                            );
                             self.client_handler(&mut client_rx, stream, shutdown_rx);
                         },
 
                     }
                 }
+
                 Event::NewMessage { from, to, content } => {
                     todo!()
                 }
+
                 Event::PeerDisconnect { addr } => {
                     todo!()
                 }
+
                 Event::ServerErrorLogRequest { err } => {
                     todo!()
                     // self.server_broadcast(err);
@@ -113,8 +133,8 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send, {
 
     async fn server_broadcast(&self, contents: String) {
         let contents = contents.as_str();
-        while let Some((_addr, sender)) = self.peers.iter().next() {
-            sender.send(contents.to_string());
+        while let Some((_addr, peer)) = self.peers.iter().next() {
+            peer.message_tx.send(contents.to_string());
         }
     }
 }
