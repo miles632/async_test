@@ -1,30 +1,27 @@
 use tokio::sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender, Receiver, Sender};
 use tokio::net::{ToSocketAddrs, TcpStream};
 use tokio::select;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use std::collections::hash_map::{Entry,HashMap};
 use std::error::Error;
-use std::fmt::Display;
+use std::fmt::{format, Debug, Display};
 use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 
 use crate::{client, ShutdownSignal};
-use crate::client::Peer;
-
-
 
 pub enum Event <A: Send>{
     NewPeer {
         addr: A,
-        stream: Arc<RwLock<TcpStream>>,
+        stream: TcpStream,
     },
     PeerDisconnect {
         addr: A,
     },
     NewMessage {
         from: A,
-        to: A,
+        to: Vec<A>,
         content: String,
     },
     ServerErrorLogRequest {
@@ -32,6 +29,10 @@ pub enum Event <A: Send>{
     }
 }
 
+pub struct Peer {
+    pub message_tx:  UnboundedSender<String>,
+    pub shutdown_tx: Sender<ShutdownSignal>
+}
 
 pub struct ServerState <A>
 where 
@@ -43,41 +44,52 @@ where
 }
 
 impl<A> ServerState<A> 
-where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send, 
+where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy, 
 {
 
     async fn event_handler(
         mut self,
-        mut event_rx: UnboundedReceiver<Event<A>>,
+        // mut event_rx: UnboundedReceiver<Event<A>>,
     ) -> Result<(), Box<dyn Error>> {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Event<A>>();
+
         while let Some(event) = event_rx.recv().await {
             match event {
 
                 Event::NewPeer { addr, stream } => {
                     let contents = format!("User {} has joined the session", addr);
-                    self.server_broadcast(contents).await;
+
+                    // let usr_event_tx = &event_tx;
                     
                     match self.peers.entry(addr) {
                         Entry::Occupied(..) => (),
                         Entry::Vacant(entry) => {
-                            let (client_tx, mut client_rx) 
-                                = mpsc::unbounded_channel(); 
-                            let (shutdown_tx, shutdown_rx) 
-                                = mpsc::channel(1);
+                            let (client_tx, mut client_rx) = mpsc::unbounded_channel(); 
+                            let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
                             entry.insert(
                                 Peer {
                                     message_tx: client_tx,
                                     shutdown_tx: shutdown_tx,
                                 }
                             );
-                            self.client_handler(&mut client_rx, stream, shutdown_rx);
+                            if let Ok(()) = self.connection_handler(&mut client_rx, stream, &event_tx).await {
+                                self.peers.remove(&addr);
+                            }
+                            self.server_broadcast(contents).await;
                         },
 
                     }
                 }
 
                 Event::NewMessage { from, to, content } => {
-                    todo!()
+                    for addr in to {
+                        let str = format!("{}: {}\n", from, content);
+
+                        let peer = self.peers.get(&addr).unwrap();
+                        if let Err(_e) = peer.message_tx.send(str) {
+                            continue;
+                        }
+                    }
                 }
 
                 Event::PeerDisconnect { addr } => {
@@ -86,49 +98,57 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send,
 
                 Event::ServerErrorLogRequest { err } => {
                     todo!()
-                    // self.server_broadcast(err);
-                    // dbg!(err);
                 }
             }
         }
-        drop(self);
+        // drop(self);
         Ok(())
     }
 
     // TODO: add server broadcasting alongside an event sender to state
-    async fn client_handler(
+    async fn connection_handler(
         &self, 
         messages: &mut UnboundedReceiver<String>, 
-        mut stream: Arc<RwLock<TcpStream>>,
-        mut shutdown_rx: Receiver<ShutdownSignal>,
+        mut stream: TcpStream,
+        event_tx: &UnboundedSender<Event<A>>,
+        // mut shutdown_tx: Sender<ShutdownSignal>,
     ) -> Result<(), Box<dyn Error>> {
 
-        let local_addr = stream.try_read().unwrap().local_addr()?;
+        let (tcp_rx, mut tcp_tx) = stream.split();
 
-        // poll the else branch unless .recv() is ready
-        select! {
-            _ = shutdown_rx.recv() => {
-                drop(stream);
-                drop(messages);
-                dbg!("client {} has been terminated", local_addr);
-            }
+        let mut tcp_rx = BufReader::new(tcp_rx).lines();
 
-            else => {
-                loop {
-                    while let Some(msg) = messages.recv().await {
-                        if let Ok(mut wguard) = stream.try_write() {
-                            wguard.write_all(msg.as_bytes());
-                        } else {
-                            let packetlossmsg = format!("Packet failed to send: {}", msg);
-                            dbg!(packetlossmsg);
-                            continue;
+        // concurrently read and write
+        loop {
+            select! {
+                // read from client
+                line = tcp_rx.next_line() => match line {
+                    Ok(line) => { // TODO: finish this and get rid of the unwraps
+                        // event_tx.send(Event::NewMessage { from: (), to: (), content: () }).unwrap();
+                        todo!()
+                    }
+                    Err(e) => {
+                        event_tx.send(Event::ServerErrorLogRequest { err: Box::new(e) }).unwrap();
+                        break;
+                    }
+                },
+
+                // send to client
+                msg = messages.recv() => match msg {
+                    Some(msg) => {
+                        if let Err(e) = tcp_tx.write_all(msg.as_bytes()).await {
+                            dbg!("failed sending packet loss\n");
+                            continue
                         }
+                    }
+                    None => {
+                        break
                     }
                 }
             }
-
         }
-        Ok(()) 
+        // shutdown_tx.send(ShutdownSignal::Cease);
+        Ok(())
     }
 
     async fn server_broadcast(&self, contents: String) {
