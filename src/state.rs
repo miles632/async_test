@@ -19,10 +19,14 @@ pub enum Event <A: Send>{
     PeerDisconnect {
         addr: A,
     },
-    NewMessage {
+    NewPrivateMessage {
         from: A,
         to: Vec<A>,
         content: String,
+    },
+    NewMessage {
+        contents: String,
+        from: A,
     },
     ServerErrorLogRequest {
         err: Box<dyn Error + Send>,
@@ -38,9 +42,7 @@ pub struct ServerState <A>
 where 
     A: ToSocketAddrs + Send
 {
-    // peers:  HashMap<A, UnboundedSender<String>>,
     peers: HashMap<A, Peer>
-    // peers: HashMap<A, (UnboundedSender<String>, UnboundedSender<ShutdownSignal>)>
 }
 
 impl<A> ServerState<A> 
@@ -49,7 +51,6 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy,
 
     async fn event_handler(
         mut self,
-        // mut event_rx: UnboundedReceiver<Event<A>>,
     ) -> Result<(), Box<dyn Error>> {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Event<A>>();
 
@@ -59,8 +60,6 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy,
                 Event::NewPeer { addr, stream } => {
                     let contents = format!("User {} has joined the session", addr);
 
-                    // let usr_event_tx = &event_tx;
-                    
                     match self.peers.entry(addr) {
                         Entry::Occupied(..) => (),
                         Entry::Vacant(entry) => {
@@ -72,24 +71,23 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy,
                                     shutdown_tx: shutdown_tx,
                                 }
                             );
-                            if let Ok(()) = self.connection_handler(&mut client_rx, stream, &event_tx).await {
+                            // TODO: spawn a task to handle this better
+                            if let Ok(()) = self.connection_handler(&mut client_rx, stream, &event_tx, addr).await {
+                                let disconnect_msg = format!("{} has been terminated", addr);
+
                                 self.peers.remove(&addr);
+                                self.server_broadcast(disconnect_msg).await;
                             }
+                            // broadcast that user connected
                             self.server_broadcast(contents).await;
                         },
 
                     }
                 }
 
-                Event::NewMessage { from, to, content } => {
-                    for addr in to {
-                        let str = format!("{}: {}\n", from, content);
-
-                        let peer = self.peers.get(&addr).unwrap();
-                        if let Err(_e) = peer.message_tx.send(str) {
-                            continue;
-                        }
-                    }
+                Event::NewMessage { contents, from } => {
+                    let contents = format!("{}: {}", from, contents);
+                    self.server_broadcast(contents).await;
                 }
 
                 Event::PeerDisconnect { addr } => {
@@ -99,19 +97,21 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy,
                 Event::ServerErrorLogRequest { err } => {
                     todo!()
                 }
+                Event::NewPrivateMessage { from, to, content } => {
+                    todo!()
+                }
             }
         }
         // drop(self);
         Ok(())
     }
 
-    // TODO: add server broadcasting alongside an event sender to state
     async fn connection_handler(
         &self, 
         messages: &mut UnboundedReceiver<String>, 
         mut stream: TcpStream,
         event_tx: &UnboundedSender<Event<A>>,
-        // mut shutdown_tx: Sender<ShutdownSignal>,
+        addr: A,
     ) -> Result<(), Box<dyn Error>> {
 
         let (tcp_rx, mut tcp_tx) = stream.split();
@@ -124,8 +124,12 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy,
                 // read from client
                 line = tcp_rx.next_line() => match line {
                     Ok(line) => { // TODO: finish this and get rid of the unwraps
-                        // event_tx.send(Event::NewMessage { from: (), to: (), content: () }).unwrap();
-                        todo!()
+                        match line {
+                            Some(line) => { 
+                                event_tx.send(Event::NewMessage { contents: line, from: addr}).unwrap();
+                            },
+                            None => continue,
+                        }
                     }
                     Err(e) => {
                         event_tx.send(Event::ServerErrorLogRequest { err: Box::new(e) }).unwrap();
@@ -147,7 +151,7 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy,
                 }
             }
         }
-        // shutdown_tx.send(ShutdownSignal::Cease);
+        // TODO: better error handling 
         Ok(())
     }
 
