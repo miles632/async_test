@@ -1,8 +1,10 @@
 use std::error::Error;
 use std::boxed::Box;
+use std::net::SocketAddr;
 
 // use futures::{Future, SinkExt};
 
+use state::ServerState;
 use tokio::sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender, Receiver, Sender};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle,spawn};
@@ -46,9 +48,21 @@ pub enum ShutdownSignal{
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1").await?;
+    // using socket addr as it supports both ipv4 and 6 
+    let mut server_state: ServerState<SocketAddr> = ServerState::new();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Event<SocketAddr>>();
+
+    server_state.event_handler(event_tx, event_rx).await;
 
     loop {
-        let (stream, addr) = listener.accept().await?;
+        // TODO: wrap event_tx in a Rc of some kind
+        let event_tx = event_tx.clone();
+        if let Ok((stream, addr)) = listener.accept().await {
+            event_tx.send(Event::NewPeer { 
+                addr: addr, 
+                stream: stream, 
+            });
+        }
     }
 
     Ok(())

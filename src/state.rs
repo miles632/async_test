@@ -1,6 +1,6 @@
 use tokio::sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender, Receiver, Sender};
 use tokio::net::{ToSocketAddrs, TcpStream};
-use tokio::select;
+use tokio::{select, task};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use std::collections::hash_map::{Entry,HashMap};
@@ -38,21 +38,22 @@ pub struct Peer {
     pub shutdown_tx: Sender<ShutdownSignal>
 }
 
-pub struct ServerState <A>
-where 
-    A: ToSocketAddrs + Send
-{
+pub struct ServerState <A: ToSocketAddrs> {
     peers: HashMap<A, Peer>
 }
 
 impl<A> ServerState<A> 
-where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy, 
+where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy + Sync, 
 {
+    pub fn new() -> Self {
+        ServerState { peers: HashMap::new() }
+    }
 
-    async fn event_handler(
+    pub async fn event_handler(
         mut self,
+        event_tx: UnboundedSender<Event<A>>,
+        mut event_rx: UnboundedReceiver<Event<A>>,
     ) -> Result<(), Box<dyn Error>> {
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Event<A>>();
 
         while let Some(event) = event_rx.recv().await {
             match event {
@@ -63,23 +64,26 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy,
                     match self.peers.entry(addr) {
                         Entry::Occupied(..) => (),
                         Entry::Vacant(entry) => {
+
                             let (client_tx, mut client_rx) = mpsc::unbounded_channel(); 
-                            let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+                            let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
+
                             entry.insert(
                                 Peer {
                                     message_tx: client_tx,
                                     shutdown_tx: shutdown_tx,
                                 }
                             );
-                            // TODO: spawn a task to handle this better
+
+                            self.server_broadcast(contents).await;
+
                             if let Ok(()) = self.connection_handler(&mut client_rx, stream, &event_tx, addr).await {
                                 let disconnect_msg = format!("{} has been terminated", addr);
 
                                 self.peers.remove(&addr);
                                 self.server_broadcast(disconnect_msg).await;
                             }
-                            // broadcast that user connected
-                            self.server_broadcast(contents).await;
+
                         },
 
                     }
@@ -112,7 +116,7 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy,
         mut stream: TcpStream,
         event_tx: &UnboundedSender<Event<A>>,
         addr: A,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error + Send>> {
 
         let (tcp_rx, mut tcp_tx) = stream.split();
 
@@ -126,7 +130,10 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy,
                     Ok(line) => { // TODO: finish this and get rid of the unwraps
                         match line {
                             Some(line) => { 
-                                event_tx.send(Event::NewMessage { contents: line, from: addr}).unwrap();
+                                if let Err(e) = event_tx.send(Event::NewMessage { contents: line, from: addr}) {
+                                    dbg!("failed sending packet loss: {}\n", e);
+                                    continue;
+                                }
                             },
                             None => continue,
                         }
@@ -141,7 +148,7 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy,
                 msg = messages.recv() => match msg {
                     Some(msg) => {
                         if let Err(e) = tcp_tx.write_all(msg.as_bytes()).await {
-                            dbg!("failed sending packet loss\n");
+                            dbg!("failed sending packet loss: {}\n", e);
                             continue
                         }
                     }
@@ -157,8 +164,11 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy,
 
     async fn server_broadcast(&self, contents: String) {
         let contents = contents.as_str();
-        while let Some((_addr, peer)) = self.peers.iter().next() {
-            peer.message_tx.send(contents.to_string());
+        while let Some((addr, peer)) = self.peers.iter().next() {
+            if let Err(e) = peer.message_tx.send(contents.to_string()) {
+                dbg!("Err: {}, whilst sending: {} to {}", e, contents, addr);
+                continue;
+            }
         }
     }
 }
