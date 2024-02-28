@@ -7,7 +7,8 @@ use std::collections::hash_map::{Entry,HashMap};
 use std::error::Error;
 use std::fmt::{format, Debug, Display};
 use std::hash::Hash;
-use std::sync::{Arc, RwLock};
+// use std::sync::{Arc, RwLock};
+use std::rc::Rc;
 
 use crate::{client, ShutdownSignal};
 
@@ -51,7 +52,7 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
 
     pub async fn event_handler(
         mut self,
-        event_tx: UnboundedSender<Event<A>>,
+        event_tx: Rc<UnboundedSender<Event<A>>>,
         mut event_rx: UnboundedReceiver<Event<A>>,
     ) -> Result<(), Box<dyn Error>> {
 
@@ -77,7 +78,7 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
 
                             self.server_broadcast(contents).await;
 
-                            if let Ok(()) = self.connection_handler(&mut client_rx, stream, &event_tx, addr).await {
+                            if let Ok(()) = self.connection_handler(&mut client_rx, stream, Rc::clone(&event_tx), addr).await {
                                 let disconnect_msg = format!("{} has been terminated", addr);
 
                                 self.peers.remove(&addr);
@@ -106,7 +107,7 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
                 }
             }
         }
-        // drop(self);
+        drop(self);
         Ok(())
     }
 
@@ -114,7 +115,7 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
         &self, 
         messages: &mut UnboundedReceiver<String>, 
         mut stream: TcpStream,
-        event_tx: &UnboundedSender<Event<A>>,
+        event_tx: Rc<UnboundedSender<Event<A>>>,
         addr: A,
     ) -> Result<(), Box<dyn Error + Send>> {
 
