@@ -58,8 +58,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 addr: addr, 
                 stream: stream, 
             }) {
-                // event_tx.send(Event::)
-                todo!()
+                continue;
             }
         } 
     }

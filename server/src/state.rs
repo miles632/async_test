@@ -55,6 +55,7 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
         event_tx: Rc<UnboundedSender<Event<A>>>,
         mut event_rx: UnboundedReceiver<Event<A>>,
     ) -> Result<(), Box<dyn Error>> {
+        println!("started server");
 
         while let Some(event) = event_rx.recv().await {
             match event {
