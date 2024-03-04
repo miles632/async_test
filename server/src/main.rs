@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 
 // use futures::{Future, SinkExt};
 
+// use futures::executor::block_on;
 use state::ServerState;
 use tokio::sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender, Receiver, Sender};
 use tokio::net::{TcpListener, TcpStream};
@@ -51,17 +52,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     server_state.event_handler(Rc::clone(&event_tx), event_rx).await.expect("failed setting up event handler");
 
-    loop {
-        let event_tx = Rc::clone(&event_tx);
-        if let Ok((stream, addr)) = listener.accept().await {
-            if let Err(e) = event_tx.send(Event::NewPeer { 
-                addr: addr, 
-                stream: stream, 
-            }) {
-                continue;
-            }
-        } 
+    while let Ok((stream, addr)) = listener.accept().await {
+        match event_tx.send(Event::NewPeer { 
+            addr: addr, 
+            stream: stream, 
+        }) {
+            Ok(()) => (),
+            Err(e) => continue,
+        }
     }
+    // loop { 
+    //     let event_tx = Rc::clone(&event_tx);
+        // if let Ok((stream, addr)) = listener.accept().await {
+        //     if let Err(e) = event_tx.send(Event::NewPeer { 
+        //         addr: addr, 
+        //         stream: stream, 
+        //     }) {
+        //         continue;
+        //     }
+        // } 
+    // }
 
     Ok(())
 }

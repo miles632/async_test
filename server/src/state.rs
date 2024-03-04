@@ -36,7 +36,6 @@ pub enum Event <A: Send>{
 
 pub struct Peer {
     pub message_tx:  UnboundedSender<String>,
-    pub shutdown_tx: Sender<ShutdownSignal>
 }
 
 pub struct ServerState <A: ToSocketAddrs> {
@@ -47,6 +46,7 @@ impl<A> ServerState<A>
 where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy + Sync, 
 {
     pub fn new() -> Self {
+        println!("made state");
         ServerState { peers: HashMap::new() }
     }
 
@@ -58,8 +58,8 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
         println!("started server");
 
         while let Some(event) = event_rx.recv().await {
+            dbg!("val received!");
             match event {
-
                 Event::NewPeer { addr, stream } => {
                     let contents = format!("User {} has joined the session", addr);
 
@@ -68,12 +68,11 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
                         Entry::Vacant(entry) => {
 
                             let (client_tx, mut client_rx) = mpsc::unbounded_channel(); 
-                            let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
+                            // let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
 
                             entry.insert(
                                 Peer {
                                     message_tx: client_tx,
-                                    shutdown_tx: shutdown_tx,
                                 }
                             );
 
@@ -108,7 +107,7 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
                 }
             }
         }
-        drop(self);
+        // drop(self);
         Ok(())
     }
 
@@ -129,7 +128,7 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
             select! {
                 // read from client
                 line = tcp_rx.next_line() => match line {
-                    Ok(line) => { // TODO: finish this and get rid of the unwraps
+                    Ok(line) => {
                         match line {
                             Some(line) => { 
                                 if let Err(e) = event_tx.send(Event::NewMessage { contents: line, from: addr}) {
@@ -149,9 +148,9 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
                 // send to client
                 msg = messages.recv() => match msg {
                     Some(msg) => {
-                        if let Err(e) = tcp_tx.write_all(msg.as_bytes()).await {
-                            dbg!("failed sending packet loss: {}\n", e);
-                            continue
+                        match tcp_tx.write_all(msg.as_bytes()).await {
+                            Ok(()) => (),
+                            Err(_) => ()
                         }
                     }
                     None => {
