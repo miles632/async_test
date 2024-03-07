@@ -7,8 +7,7 @@ use std::collections::hash_map::{Entry,HashMap};
 use std::error::Error;
 use std::fmt::{format, Debug, Display};
 use std::hash::Hash;
-// use std::sync::{Arc, RwLock};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::{client, ShutdownSignal};
 
@@ -52,9 +51,10 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
 
     pub async fn event_handler(
         mut self,
-        event_tx: Rc<UnboundedSender<Event<A>>>,
+        event_tx: Arc<UnboundedSender<Event<A>>>,
         mut event_rx: UnboundedReceiver<Event<A>>,
-    ) -> Result<(), Box<dyn Error>> {
+        // + Send is just a workaround for now
+    ) -> Result<(), Box<dyn Error + Send>> {
         println!("started server");
 
         while let Some(event) = event_rx.recv().await {
@@ -75,16 +75,17 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
                                     message_tx: client_tx,
                                 }
                             );
+                            dbg!("inserted user");
 
                             self.server_broadcast(contents).await;
 
-                            if let Ok(()) = self.connection_handler(&mut client_rx, stream, Rc::clone(&event_tx), addr).await {
+                            if let Ok(()) = self.connection_handler(&mut client_rx, stream, Arc::clone(&event_tx), addr).await {
                                 let disconnect_msg = format!("{} has been terminated", addr);
+                                dbg!("terminated cunt");
 
                                 self.peers.remove(&addr);
                                 self.server_broadcast(disconnect_msg).await;
                             }
-
                         },
 
                     }
@@ -115,35 +116,34 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
         &self, 
         messages: &mut UnboundedReceiver<String>, 
         mut stream: TcpStream,
-        event_tx: Rc<UnboundedSender<Event<A>>>,
+        event_tx: Arc<UnboundedSender<Event<A>>>,
         addr: A,
-    ) -> Result<(), Box<dyn Error + Send>> {
+    // ) -> Result<(), Box<dyn Error + Send>> {
+        // function doesn't really fail besides the tcp receiver receiving a 0 which just 
+        // returns Ok() and exits
+        ) -> Result<(), ()> {
 
         let (tcp_rx, mut tcp_tx) = stream.split();
 
-        let mut tcp_rx = BufReader::new(tcp_rx).lines();
+        let mut tcp_rx = BufReader::new(tcp_rx);
+        let mut line = String::new();
 
         // concurrently read and write
         loop {
             select! {
                 // read from client
-                line = tcp_rx.next_line() => match line {
-                    Ok(line) => {
-                        match line {
-                            Some(line) => { 
-                                if let Err(e) = event_tx.send(Event::NewMessage { contents: line, from: addr}) {
-                                    dbg!("failed sending packet loss: {}\n", e);
-                                    continue;
-                                }
-                            },
-                            None => continue,
-                        }
-                    }
-                    Err(e) => {
-                        event_tx.send(Event::ServerErrorLogRequest { err: Box::new(e) }).unwrap();
+                bytes_read = tcp_rx.read_line(&mut line) => {
+                    if bytes_read.unwrap() == 0 {
                         break;
                     }
-                },
+
+                    if let Err(e) = event_tx.send(Event::NewMessage { contents: line.clone(), from: addr}) {
+                        dbg!("failed sending packet loss: {}\n", e);
+                        continue;
+                    }
+                    
+                    line.clear();
+                }
 
                 // send to client
                 msg = messages.recv() => match msg {
@@ -154,12 +154,11 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
                         }
                     }
                     None => {
-                        break
+                        continue;
                     }
                 }
             }
         }
-        // TODO: better error handling 
         Ok(())
     }
 

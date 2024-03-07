@@ -9,7 +9,8 @@ use state::ServerState;
 use tokio::sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender, Receiver, Sender};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle,spawn};
-use std::rc::Rc;
+// use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::state::Event;
 
@@ -48,30 +49,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // tx has to be wrapped in some sort of a reference counted pointer,
     // RefCell or Cell is not needed due to sending not requiring any interior mutation
     // rx can stay as is due to it needing mutation for receiving anyway
-    let event_tx = Rc::new(event_tx); 
+    // let event_tx = Arc::new(event_tx); 
+    // let mut event_rx: &mut UnboundedReceiver<Event<SocketAddr>> = &mut event_rx;
 
-    server_state.event_handler(Rc::clone(&event_tx), event_rx).await.expect("failed setting up event handler");
+    let event_tx = Arc::new(event_tx);
+
+    tokio::task::spawn({
+        server_state.event_handler(Arc::clone(&event_tx), event_rx)
+    }
+    );
+    // server_state.event_handler(Rc::clone(&event_tx), &mut event_rx).await.expect("failed setting up event handler");
 
     while let Ok((stream, addr)) = listener.accept().await {
+        let event_tx = Arc::clone(&event_tx);
         match event_tx.send(Event::NewPeer { 
             addr: addr, 
             stream: stream, 
         }) {
-            Ok(()) => (),
-            Err(e) => continue,
+            Ok(()) => {
+            },
+            Err(e) => {
+                dbg!("failed appending peer");
+                continue;
+            },
         }
     }
-    // loop { 
-    //     let event_tx = Rc::clone(&event_tx);
-        // if let Ok((stream, addr)) = listener.accept().await {
-        //     if let Err(e) = event_tx.send(Event::NewPeer { 
-        //         addr: addr, 
-        //         stream: stream, 
-        //     }) {
-        //         continue;
-        //     }
-        // } 
-    // }
-
     Ok(())
 }

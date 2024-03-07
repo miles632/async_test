@@ -33,7 +33,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
                         continue;
                     }
                     match tcp_tx.write_all(msg.unwrap().as_bytes()).await {
-                        
+                        Ok(()) => (),
+                        Err(_) => ()
                     }
                 }
                 Err(_) => {continue;}
