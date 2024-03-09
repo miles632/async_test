@@ -67,6 +67,8 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
                         Entry::Occupied(..) => (),
                         Entry::Vacant(entry) => {
 
+                            let event_tx = Arc::clone(&event_tx);
+
                             let (client_tx, mut client_rx) = mpsc::unbounded_channel(); 
                             // let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
 
@@ -79,13 +81,14 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
 
                             self.server_broadcast(contents).await;
 
-                            if let Ok(()) = self.connection_handler(&mut client_rx, stream, Arc::clone(&event_tx), addr).await {
-                                let disconnect_msg = format!("{} has been terminated", addr);
-                                dbg!("terminated cunt");
+                            task::spawn(self.connection_handler(&mut client_rx, stream, event_tx, addr));
+                            // if let Ok(()) = self.connection_handler(&mut client_rx, stream, Arc::clone(&event_tx), addr).await {
+                            //     let disconnect_msg = format!("{} has been terminated", addr);
+                            //     dbg!("terminated cunt");
 
-                                self.peers.remove(&addr);
-                                self.server_broadcast(disconnect_msg).await;
-                            }
+                            //     self.peers.remove(&addr);
+                            //     self.server_broadcast(disconnect_msg).await;
+                            // }
                         },
 
                     }
