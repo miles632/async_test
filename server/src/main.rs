@@ -43,8 +43,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(sockaddr).await?;
 
     // using socket addr as it supports both ipv4 and 6 
-    let mut server_state: ServerState<SocketAddr> = ServerState::new();
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Event<SocketAddr>>();
+    let mut server_state: ServerState = ServerState::new();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Event>();
 
     // tx has to be wrapped in some sort of a reference counted pointer,
     // RefCell or Cell is not needed due to sending not requiring any interior mutation

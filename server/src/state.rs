@@ -1,7 +1,8 @@
+#![warn(unused, unused_imports)]
 use tokio::sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender, Receiver, Sender};
 use tokio::net::{ToSocketAddrs, TcpStream};
 use tokio::{select, task};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, AsyncRead};
 
 use std::collections::hash_map::{Entry,HashMap};
 use std::error::Error;
@@ -9,100 +10,115 @@ use std::fmt::{format, Debug, Display};
 use std::hash::Hash;
 use std::sync::Arc;
 
+use std::net::SocketAddr;
+
 use crate::{client, ShutdownSignal};
 
-pub enum Event <A: Send>{
+// #[derive(AsyncRead)]
+pub enum Event{
     NewPeer {
-        addr: A,
+        addr: SocketAddr,
         stream: TcpStream,
     },
-    PeerDisconnect {
-        addr: A,
+    UserDisconnect {
+        addr: SocketAddr,
     },
     NewPrivateMessage {
-        from: A,
-        to: Vec<A>,
+        from: SocketAddr,
+        to: Vec<SocketAddr>,
         content: String,
     },
-    NewMessage {
+    AllMessage {
         contents: String,
-        from: A,
+        from: SocketAddr,
     },
-    ServerErrorLogRequest {
-        err: Box<dyn Error + Send>,
+    UserConnect {
+        usr_addr: SocketAddr,
+        sender: UnboundedSender<String>,
+    }
+}
+    // ServerErrorLogRequest {
+    //     err: Box<dyn Error + Send>,
+    // },
+
+impl AsyncRead for Event {
+    fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+                buf: &mut [u8],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+        
     }
 }
 
-pub struct Peer {
-    pub message_tx:  UnboundedSender<String>,
+// #[derive(Clone)]
+// pub struct Peer {
+//     pub message_tx:  UnboundedSender<String>,
+// }
+
+#[derive(Clone)]
+pub struct ServerState {
+    peers: HashMap<SocketAddr, UnboundedSender<String>>
 }
 
-pub struct ServerState <A: ToSocketAddrs> {
-    peers: HashMap<A, Peer>
-}
-
-impl<A> ServerState<A> 
-where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy + Sync, 
+impl ServerState 
+// where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Sync + AsyncRead 
+// + 'static 
 {
+
     pub fn new() -> Self {
         println!("made state");
         ServerState { peers: HashMap::new() }
     }
 
     pub async fn event_handler(
-        mut self,
-        event_tx: Arc<UnboundedSender<Event<A>>>,
-        mut event_rx: UnboundedReceiver<Event<A>>,
+        &mut self,
+        event_tx: Arc<UnboundedSender<Event>>,
+        mut event_rx: UnboundedReceiver<Event>,
         // + Send is just a workaround for now
     ) -> Result<(), Box<dyn Error + Send>> {
         println!("started server");
+
+        let events_buf = BufReader::new(event_rx);
 
         while let Some(event) = event_rx.recv().await {
             dbg!("val received!");
             match event {
                 Event::NewPeer { addr, stream } => {
-                    let contents = format!("User {} has joined the session", addr);
+                    let event_tx = Arc::clone(&event_tx);
 
-                    match self.peers.entry(addr) {
-                        Entry::Occupied(..) => (),
-                        Entry::Vacant(entry) => {
+                    task::spawn(async move {
+                        let contents = format!("User {} has joined the session", addr);
 
-                            let event_tx = Arc::clone(&event_tx);
+                        let (client_tx, mut client_rx) = mpsc::unbounded_channel(); 
 
-                            let (client_tx, mut client_rx) = mpsc::unbounded_channel(); 
-                            // let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
-
-                            entry.insert(
-                                Peer {
-                                    message_tx: client_tx,
-                                }
-                            );
+                        if let None = self.peers.insert(addr, client_tx) {
                             dbg!("inserted user");
+                            dbg!(addr);
+                        }
 
-                            self.server_broadcast(contents).await;
+                        if let Ok(()) = ServerState::connection_handler(&mut client_rx, stream, event_tx, addr).await {
+                            let disconnect_msg = format!("user {} has disconnected", addr);
+                            self.server_broadcast(disconnect_msg).await;
+                            self.peers.remove(&addr);
+                        }
+                    });
+                }
 
-                            task::spawn(self.connection_handler(&mut client_rx, stream, event_tx, addr));
-                            // if let Ok(()) = self.connection_handler(&mut client_rx, stream, Arc::clone(&event_tx), addr).await {
-                            //     let disconnect_msg = format!("{} has been terminated", addr);
-                            //     dbg!("terminated cunt");
-
-                            //     self.peers.remove(&addr);
-                            //     self.server_broadcast(disconnect_msg).await;
-                            // }
-                        },
-
+                Event::Message { contents, from } => {
+                    let contents = format!("{}: {}", from, contents);
+                    // self.server_broadcast(contents).await;
+                }
+                Event::UserConnect { usr_addr, sender } => {
+                    if let None = self.peers.insert(usr_addr, sender) {
+                        let connect_msg = format!("User {} joined", usr_addr);
+                        self.server_broadcast(connect_msg);
                     }
                 }
 
-                Event::NewMessage { contents, from } => {
-                    let contents = format!("{}: {}", from, contents);
-                    self.server_broadcast(contents).await;
-                }
-
                 Event::PeerDisconnect { addr } => {
-                    todo!()
+                    
                 }
-
                 Event::ServerErrorLogRequest { err } => {
                     todo!()
                 }
@@ -116,12 +132,11 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
     }
 
     async fn connection_handler(
-        &self, 
+        // &mut self, 
         messages: &mut UnboundedReceiver<String>, 
         mut stream: TcpStream,
-        event_tx: Arc<UnboundedSender<Event<A>>>,
-        addr: A,
-    // ) -> Result<(), Box<dyn Error + Send>> {
+        event_tx: Arc<UnboundedSender<Event>>,
+        addr: SocketAddr,
         // function doesn't really fail besides the tcp receiver receiving a 0 which just 
         // returns Ok() and exits
         ) -> Result<(), ()> {
@@ -130,6 +145,10 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
 
         let mut tcp_rx = BufReader::new(tcp_rx);
         let mut line = String::new();
+
+        let hello_str = "hello".to_string();
+        tcp_tx.write_all(hello_str.as_bytes()).await.unwrap();
+
 
         // concurrently read and write
         loop {
@@ -140,7 +159,7 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
                         break;
                     }
 
-                    if let Err(e) = event_tx.send(Event::NewMessage { contents: line.clone(), from: addr}) {
+                    if let Err(e) = event_tx.send(Event::Message { contents: line.clone(), from: addr}) {
                         dbg!("failed sending packet loss: {}\n", e);
                         continue;
                     }
@@ -167,8 +186,8 @@ where A: ToSocketAddrs + PartialEq + Eq + Display + Hash + Send + Debug + Copy +
 
     async fn server_broadcast(&self, contents: String) {
         let contents = contents.as_str();
-        while let Some((addr, peer)) = self.peers.iter().next() {
-            if let Err(e) = peer.message_tx.send(contents.to_string()) {
+        while let Some((addr, sender)) = self.peers.iter().next() {
+            if let Err(e) = sender.send(contents.to_string()) {
                 dbg!("Err: {}, whilst sending: {} to {}", e, contents, addr);
                 continue;
             }
