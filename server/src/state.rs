@@ -20,7 +20,7 @@ pub enum Event{
         addr: SocketAddr,
         stream: TcpStream,
     },
-    UserDisconnect {
+    DropUser {
         addr: SocketAddr,
     },
     NewPrivateMessage {
@@ -32,7 +32,7 @@ pub enum Event{
         contents: String,
         from: SocketAddr,
     },
-    UserConnect {
+    UserAppend {
         usr_addr: SocketAddr,
         sender: UnboundedSender<String>,
     }
@@ -40,16 +40,6 @@ pub enum Event{
     // ServerErrorLogRequest {
     //     err: Box<dyn Error + Send>,
     // },
-
-impl AsyncRead for Event {
-    fn poll_read(
-                self: std::pin::Pin<&mut Self>,
-                cx: &mut std::task::Context<'_>,
-                buf: &mut [u8],
-            ) -> std::task::Poll<std::io::Result<usize>> {
-        
-    }
-}
 
 // #[derive(Clone)]
 // pub struct Peer {
@@ -79,49 +69,41 @@ impl ServerState
     ) -> Result<(), Box<dyn Error + Send>> {
         println!("started server");
 
-        let events_buf = BufReader::new(event_rx);
-
         while let Some(event) = event_rx.recv().await {
             dbg!("val received!");
             match event {
                 Event::NewPeer { addr, stream } => {
                     let event_tx = Arc::clone(&event_tx);
 
-                    task::spawn(async move {
-                        let contents = format!("User {} has joined the session", addr);
-
+                    task::spawn( async move{
                         let (client_tx, mut client_rx) = mpsc::unbounded_channel(); 
 
-                        if let None = self.peers.insert(addr, client_tx) {
-                            dbg!("inserted user");
-                            dbg!(addr);
-                        }
+                        event_tx.send(Event::UserAppend { usr_addr: addr, sender: client_tx }).unwrap();
 
                         if let Ok(()) = ServerState::connection_handler(&mut client_rx, stream, event_tx, addr).await {
-                            let disconnect_msg = format!("user {} has disconnected", addr);
-                            self.server_broadcast(disconnect_msg).await;
-                            self.peers.remove(&addr);
+                            // let disconnect_msg = format!("user {} has disconnected", addr);
+                            // self.server_broadcast(disconnect_msg).await;
+                            // self.peers.remove(&addr);
+                            let event_tx = Arc::clone(&event_tx);
+                            event_tx.send(Event::DropUser { addr: addr }).unwrap();
                         }
                     });
                 }
 
-                Event::Message { contents, from } => {
+                Event::AllMessage { contents, from } => {
                     let contents = format!("{}: {}", from, contents);
                     // self.server_broadcast(contents).await;
                 }
-                Event::UserConnect { usr_addr, sender } => {
+                Event::UserAppend { usr_addr, sender } => {
                     if let None = self.peers.insert(usr_addr, sender) {
                         let connect_msg = format!("User {} joined", usr_addr);
                         self.server_broadcast(connect_msg);
                     }
                 }
-
-                Event::PeerDisconnect { addr } => {
-                    
-                }
-                Event::ServerErrorLogRequest { err } => {
-                    todo!()
-                }
+                Event::DropUser { addr } => {todo!()}
+                // Event::ServerErrorLogRequest { err } => {
+                //     todo!()
+                // }
                 Event::NewPrivateMessage { from, to, content } => {
                     todo!()
                 }
@@ -159,7 +141,7 @@ impl ServerState
                         break;
                     }
 
-                    if let Err(e) = event_tx.send(Event::Message { contents: line.clone(), from: addr}) {
+                    if let Err(e) = event_tx.send(Event::AllMessage { contents: line.clone(), from: addr}) {
                         dbg!("failed sending packet loss: {}\n", e);
                         continue;
                     }
