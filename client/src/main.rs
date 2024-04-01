@@ -1,18 +1,43 @@
-// use tokio::net::unix::SocketAddr;
 use std::net::SocketAddr;
+// use std::io::Result;
+use std::error::Error;
 
-use tokio::{io::{stdin, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader}, net::TcpStream, select};
+use tokio::{
+    io::{stdin, Stdin, AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
+    net::TcpStream, select
+};
+
+use term::color::{Color, BLACK, RED};
+use term::Attr;
 
 pub const PORT: u16 = 8080;
 
+macro_rules! print_socket_message {
+    ($input1: ident, $input2: ident) => {
+        println!(
+            "{}{:?}{}: {}",
+            Attr::ForegroundColor(RED),
+            $input1,
+            Attr::ForegroundColor(BLACK),
+            $input2
+        )
+    };
+
+    ($input: ident) => {
+        let iter = $input.split(':').collect();
+
+    };
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>>{
+async fn main() -> Result<(), Box<dyn Error>>{
     let sockaddr = SocketAddr::from(([127, 0, 0, 1], PORT));
     let mut stream = TcpStream::connect(sockaddr).await.unwrap();
 
     let (tcp_rx, mut tcp_tx) = stream.split();
     let mut tcp_rx = BufReader::new(tcp_rx).lines();
     let mut stdin = BufReader::new(stdin()).lines();
+
 
     loop {
         select! {
@@ -28,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
             },
 
             msg_to_send = stdin.next_line() => match msg_to_send {
-                Ok(msg) => { 
+                Ok(msg) => {
                     if msg == None {
                         continue;
                     }
@@ -40,10 +65,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>{
                 Err(_) => {continue;}
             }
         }
-    } 
+    }
 
     // recieve msg
-    let mut buffer:[u8;1024] = [0; 1024];
+    // let mut buffer:[u8;1024] = [0; 1024];
 
     Ok(())
 }
+
