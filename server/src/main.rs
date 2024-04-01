@@ -1,78 +1,145 @@
+use tokio::net::{TcpStream, TcpListener};
+use tokio::sync::mpsc;
+use tokio::sync::{RwLockReadGuard, RwLockWriteGuard, RwLock};
+use tokio::sync::mpsc::{UnboundedSender,UnboundedReceiver};
+use tokio::select;
+use tokio::task;
+
 use std::error::Error;
 use std::boxed::Box;
 use std::net::SocketAddr;
-
-// use futures::{Future, SinkExt};
-
-// use futures::executor::block_on;
-use state::ServerState;
-use tokio::sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender, Receiver, Sender};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::task::{JoinHandle,spawn};
-// use std::rc::Rc;
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::io::ErrorKind::WouldBlock;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 
-use crate::state::Event;
 
-pub mod state;
-pub mod client;
+const LOCAL_ADDR: &str = "127.0.0.1:8080";
+const MAX_MSG_SIZE: usize = 4096;
 
-// pub const ADDR: &str = "127.0.0.1";
-// pub const PORT: &str = "8080";
+type Sender<T> = UnboundedSender<T>;
+type Receiver<T> = UnboundedReceiver<T>;
 
-// async fn unwrap_future<F,A>(future: F, sender: UnboundedSender<Event<A>>) -> JoinHandle<()>
-// where 
-//     F: Future<Output = Result<(), Box<dyn Error + Send>>> + Send + 'static + Send,
-//     A: Send + 'static, 
-// {
-//     tokio::task::spawn(async move {
-//         if let Err(e) = future.await {
-//             sender.send(Event::ServerErrorLogRequest { err: e }).unwrap();
-//         }
-//     })
-// }
+// type UserTable = HashMap<SocketAddr, Client>;
+fn send_all(
+    msg:      Vec<u8>,
+    mut write_guard: RwLockWriteGuard<HashMap<SocketAddr, Client>>,
+) {
+    for (_k, v) in write_guard.iter_mut() {
+        v.stream.write(&msg);
+    }
+}
 
-pub enum ShutdownSignal{
-    Cease
+struct Client {
+    stream: TcpStream,
+    addr: SocketAddr,
+
+    // msg_rcv_buf: Vec<u8>,
+    // msg_snd_buf: Vec<u8>,
+
+    connected: bool,
+}
+
+impl Client {
+    fn new(stream: TcpStream, addr: SocketAddr) -> Client {
+        let mut client = Client {
+            stream: stream, 
+            addr: addr,
+
+            // msg_rcv_buf: vec![],
+            // msg_snd_buf: vec![],
+
+            connected: true,
+        }; 
+        client
+    }
+
+    async fn handle(
+        &self,
+        // msg_recv: Receiver<Vec<u8>>,
+        mut user_table: Arc<RwLock<HashMap<SocketAddr, Client>>>,
+        ) -> Result<(), Box<dyn Error>> {
+        dbg!("handle");
+        while let msg_to_broadcast = self.read_from_stream().await {
+            println!("sending {}", String::from_utf8_lossy(&msg_to_broadcast));
+            let mut write_guard = user_table.write().await;
+            send_all(msg_to_broadcast, write_guard);
+        }
+        Ok(())
+    }
+
+    async fn read_from_stream(&self) -> Vec<u8> {
+        let mut buf = [0; MAX_MSG_SIZE];
+        loop {
+            self.stream.readable().await.expect("FUCK");
+            dbg!("trying to fucking read");
+            match self.stream.try_read(&mut buf) {
+                Ok(0) => {
+                    dbg!("read 0 bytes");
+                    // self.connected = false;
+                    //drop(self);
+                },
+
+                Ok(bytes) => {
+                    println!("read {} bytes", bytes);
+                    return buf.to_vec();
+                },
+                
+                Err(e) => {
+                    if e.kind() == WouldBlock {
+                        continue;
+                    } else {
+                        eprintln!("{}", e);
+                    }
+                },
+            }
+        }
+    }
+
+    async fn remove_client_from_map(
+        &self,
+        mut client_table: RwLockWriteGuard<'_, HashMap<SocketAddr,Client>>) {
+        client_table.remove(&self.addr);
+    }
 }
 
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let sockaddr = SocketAddr::from(([127, 0, 0, 1], 8080));
-    let listener = TcpListener::bind(sockaddr).await?;
+async fn main() -> Result<(), Box<dyn Error>>{
+    let listener = TcpListener::bind(LOCAL_ADDR).await?;
 
-    // using socket addr as it supports both ipv4 and 6 
-    let mut server_state: ServerState = ServerState::new();
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Event>();
+    //let (tx, mut rx) = unbounded_channel::new();
+    let mut client_table: Arc<RwLock<HashMap<SocketAddr, Client>>>  =
+        Arc::new(RwLock::new(HashMap::new()));
 
-    // tx has to be wrapped in some sort of a reference counted pointer,
-    // RefCell or Cell is not needed due to sending not requiring any interior mutation
-    // rx can stay as is due to it needing mutation for receiving anyway
-    // let event_tx = Arc::new(event_tx); 
-    // let mut event_rx: &mut UnboundedReceiver<Event<SocketAddr>> = &mut event_rx;
+    while let Ok((mut stream, addr)) = listener.accept().await {
+        println!("new user: {}", addr);
+        let mut c = Client::new(stream, addr);
 
-    let event_tx = Arc::new(event_tx);
+        let mut client_table = Arc::clone(&client_table);
+        client_table.write().await.insert(c.addr, c);
 
-    tokio::task::spawn({
-        server_state.event_handler(Arc::clone(&event_tx), event_rx)
+        task::spawn(async move {
+            // c.handle(Arc::clone(&client_table)).await;
+            match client_table.read().await.get(&addr) {
+                Some(client) => {
+                    if client.handle(Arc::clone(&client_table)).await.is_ok() {
+                        client.remove_client_from_map(Arc::clone(&client_table).write().await).await;
+                    }
+                }
+
+                None => {
+                    ()
+                }
+            }
+
+
+        });
+
+        // let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
     }
-    );
-    // server_state.event_handler(Rc::clone(&event_tx), &mut event_rx).await.expect("failed setting up event handler");
 
-    while let Ok((stream, addr)) = listener.accept().await {
-        let event_tx = Arc::clone(&event_tx);
-        match event_tx.send(Event::NewPeer { 
-            addr: addr, 
-            stream: stream, 
-        }) {
-            Ok(()) => {
-            },
-            Err(e) => {
-                dbg!("failed appending peer");
-                continue;
-            },
-        }
-    }
+
     Ok(())
 }
